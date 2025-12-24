@@ -9,7 +9,8 @@ import traceback
 
 import torch
 import torch.nn as nn
-from funasr import AutoModel
+# from funasr import AutoModel
+from funasr.auto.auto_model import AutoModel
 from funasr.metrics.compute_acc import compute_accuracy
 from funasr.register import tables
 from funasr.train_utils.device_funcs import force_gatherable, to_device
