@@ -7,6 +7,8 @@ import tracemalloc
 import numpy as np
 import argparse
 import ssl
+import traceback
+import torch
 
 
 # ==============================================================================
@@ -86,11 +88,23 @@ model_asr = AutoModel(
     disable_update=True, # 禁用联网更新检查，防止因内网或代理问题导致启动报错
     disable_pbar=True,   # 禁用进度条，保持后台运行日志整洁
     disable_log=True,    # 禁用详细日志输出
+    trust_remote_code=True,
 )
 
-# 2. 流式 ASR 模型占位
-# 对于 SenseVoiceSmall 这种非流式模型，我们将该项设为 None
-model_asr_streaming = None
+# 2. 加载流式 ASR 模型 (用于 online 或 2pass 模式的第一路识别)
+if args.asr_model_online != "":
+    print(f"loading online model: {args.asr_model_online}")
+    model_asr_streaming = AutoModel(
+        model=args.asr_model_online,
+        # model_revision=args.asr_model_online_revision,
+        device=args.device,
+        disable_update=True,
+        disable_pbar=True,
+        disable_log=True,
+        trust_remote_code=True,
+    )
+else:
+    model_asr_streaming = None
 
 # 3. 加载 VAD 模型 (语音端点检测)
 # VAD 非常重要，它负责实时监听音频流，判断用户什么时候开始说话，什么时候结束
@@ -103,6 +117,7 @@ model_vad = AutoModel(
     disable_update=True,
     disable_pbar=True,
     disable_log=True,
+    trust_remote_code=True,
 )
 
 # 4. 加载标点预测模型 (可选)
@@ -116,6 +131,7 @@ if args.punc_model != "":
         disable_update=True,
         disable_pbar=True,
         disable_log=True,
+        trust_remote_code=True,
     )
 else:
     model_punc = None
@@ -228,8 +244,9 @@ async def ws_serve(websocket, path=None):
                             audio_in = b"".join(frames_asr_online)
                             try:
                                 await async_asr_online(websocket, audio_in)
-                            except:
-                                print(f"error in asr streaming, {websocket.status_dict_asr_online}")
+                            except Exception as e:
+                                print(f"error in asr streaming, {websocket.status_dict_asr_online}, {e}")
+                                traceback.print_exc()
                         frames_asr_online = []
                     
                     if speech_start:
@@ -238,8 +255,9 @@ async def ws_serve(websocket, path=None):
                     # 2. 执行实时 VAD (端点检测)：判断人声开始和结束
                     try:
                         speech_start_i, speech_end_i = await async_vad(websocket, message)
-                    except:
-                        print("error in vad")
+                    except Exception as e:
+                        print(f"error in vad: {e}")
+                        traceback.print_exc()
                     
                     # 如果检测到“开始说话”，标记 speech_start 为 True 并提取回溯缓存
                     if speech_start_i != -1:
@@ -256,8 +274,9 @@ async def ws_serve(websocket, path=None):
                         audio_in = b"".join(frames_asr)
                         try:
                             await async_asr(websocket, audio_in) # 调用主 ASR 模型
-                        except:
-                            print("error in asr offline")
+                        except Exception as e:
+                            print(f"error in asr offline: {e}")
+                            traceback.print_exc()
                     
                     # 一句识别结束，清空当前句的各种缓存状态，准备接收下一句
                     frames_asr = []
@@ -286,7 +305,10 @@ async def async_vad(websocket, audio_in):
     """
     调用 VAD 模型，返回当前音频片中的人声开始(speech_start)和结束(speech_end)偏移量。
     """
-    segments_result = model_vad.generate(input=audio_in, **websocket.status_dict_vad)[0]["value"]
+    if isinstance(audio_in, bytes):
+        audio_in = np.frombuffer(audio_in, dtype=np.int16).astype(np.float32) / 32768.0
+    
+    segments_result = model_vad.generate(input=[audio_in], **websocket.status_dict_vad)[0]["value"]
 
     speech_start = -1
     speech_end = -1
@@ -305,17 +327,49 @@ async def async_asr(websocket, audio_in):
     对整句音频调用离线 ASR 模型进行最终的高精度识别。
     """
     if len(audio_in) > 0:
-        # 1. 推理获得识别文字
-        rec_result = model_asr.generate(input=audio_in, **websocket.status_dict_asr)[0]
+        # 1. 自动识别输入格式并转换为 float32 的 torch.Tensor (提高兼容性)
+        if isinstance(audio_in, bytes):
+            audio_in_np = np.frombuffer(audio_in, dtype=np.int16).astype(np.float32) / 32768.0
+        else:
+            audio_in_np = audio_in
         
-        # 2. 如果存在标点模型，则对文本进行标点预测处理
+        # 将 numpy 转换为 tensor，并确保在正确的设备上
+        audio_in_tensor = torch.from_numpy(audio_in_np).to(args.device)
+        
+        # 2. 推理获得识别文字
+        params = websocket.status_dict_asr.copy()
+        if "cache" not in params:
+            params["cache"] = {}
+            
+        # 针对 Fun-ASR-Nano 等模型，包装成它期望的格式
+        if "Fun-ASR-Nano" in args.asr_model:
+             # Fun-ASR-Nano 内部对 input=[tensor] 有更稳健的处理路径
+             res = model_asr.generate(input=[audio_in_tensor], **params)
+        else:
+             # 其他模型尝试标准调用
+             res = model_asr.generate(input=[audio_in_np], **params)
+
+        if len(res) == 0:
+            return
+        
+        rec_result = res[0]
+        
+        # 针对一些模型返回嵌套列表的情况进行兼容处理 (例如 [[{...}]])
+        if isinstance(rec_result, list) and len(rec_result) > 0:
+            rec_result = rec_result[0]
+        
+        # 兼容旧版模型可能直接返回字符串或非字典格式的情况
+        if not isinstance(rec_result, dict):
+            rec_result = {"text": str(rec_result)}
+        
+        # 3. 如果存在标点模型，则对文本进行标点预测处理
         if model_punc is not None and len(rec_result["text"]) > 0:
             rec_result = model_punc.generate(
                 input=rec_result["text"], **websocket.status_dict_punc
             )[0]
         
-        # 3. 针对 SenseVoice 模型进行后处理，过滤情绪、语种标签（如 <|zh|>）
-        if "iic/SenseVoiceSmall" in args.asr_model or "SenseVoice" in args.asr_model:
+        # 3. 针对 SenseVoice/Fun-ASR-Nano 模型进行后处理，过滤情绪、语种标签（如 <|zh|>）
+        if "iic/SenseVoiceSmall" in args.asr_model or "SenseVoice" in args.asr_model or "Fun-ASR-Nano" in args.asr_model:
             rec_result["text"] = rich_transcription_postprocess(rec_result["text"])
 
         # 4. 将识别结果打包成 JSON，通过 WebSocket 发送回客户端
@@ -348,9 +402,18 @@ async def async_asr_online(websocket, audio_in):
     """
     执行实时在线（流式）识别。
     """
+    if model_asr_streaming is None:
+        return
+        
     if len(audio_in) > 0:
+        # 将 bytes 转换为 float32 numpy 数组
+        if isinstance(audio_in, bytes):
+            audio_in_np = np.frombuffer(audio_in, dtype=np.int16).astype(np.float32) / 32768.0
+        else:
+            audio_in_np = audio_in
+
         rec_result = model_asr_streaming.generate(
-            input=audio_in, **websocket.status_dict_asr_online
+            input=[audio_in_np], **websocket.status_dict_asr_online
         )[0]
         if websocket.mode == "2pass" and websocket.status_dict_asr_online.get("is_final", False):
             return
