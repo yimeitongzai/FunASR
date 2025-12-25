@@ -252,29 +252,52 @@ async def message(id):
             if "mode" not in meg: continue
             
             # 3. 屏幕刷新与实时显示逻辑
+            # ==============================================================================
+            # 模式 A: [对话助手模式] - 说一句、断一句、识别一句。适合对接 Agent/LLM。
+            # ==============================================================================
             if meg["mode"] == "online":
-                # 实时模式：文字随说随跳
-                text_print += "{}".format(text)
-                text_print = text_print[-args.words_max_print :]
                 os.system("clear")
-                print("\r识别结果: " + text_print)
+                print("\r正在说话: " + text)
             elif meg["mode"] == "offline":
-                # 离线整句模式：说完一整句后显示结果
-                text_print += "{}".format(text)
-                print("\r识别结果: " + wav_name + ": " + text_print)
+                print("\r[Agent 触发] 识别结果: " + text)
+                # 在这里对接你的 LangGraph 或 Agent:
+                # await your_agent.invoke(text)
                 offline_msg_done = True
             else:
-                # 2pass 模式：结合了 online 的快和 offline 的准
                 if meg["mode"] == "2pass-online":
-                    text_print_2pass_online += "{}".format(text)
-                    text_print = text_print_2pass_offline + text_print_2pass_online
+                    os.system("clear")
+                    print("\r正在输入: " + text)
                 else:
-                    text_print_2pass_online = ""
-                    text_print = text_print_2pass_offline + "{}".format(text)
-                    text_print_2pass_offline += "{}".format(text)
-                text_print = text_print[-args.words_max_print :]
-                os.system("clear")
-                print("\r识别结果: " + text_print)
+                    # 收到 2pass-offline，表示一句话完整结束了
+                    os.system("clear")
+                    print("\r[Agent 触发] 最终识别结果: " + text)
+                    # 在这里对接你的 LangGraph 或 Agent:
+                    # await your_agent.invoke(text)
+
+            # ==============================================================================
+            # 模式 B: [会议转录模式] - 累加显示。适合记录长会议。
+            # (如需切换回此模式，请注释掉上面的“模式 A”，并取消下面“模式 B”的注释)
+            # ==============================================================================
+            # if meg["mode"] == "online":
+            #     text_print += "{}".format(text)
+            #     text_print = text_print[-args.words_max_print :]
+            #     os.system("clear")
+            #     print("\r识别结果: " + text_print)
+            # elif meg["mode"] == "offline":
+            #     text_print += "{}".format(text)
+            #     print("\r识别结果: " + wav_name + ": " + text_print)
+            #     offline_msg_done = True
+            # else:
+            #     if meg["mode"] == "2pass-online":
+            #         text_print_2pass_online += "{}".format(text)
+            #         text_print = text_print_2pass_offline + text_print_2pass_online
+            #     else:
+            #         text_print_2pass_online = ""
+            #         text_print = text_print_2pass_offline + "{}".format(text)
+            #         text_print_2pass_offline += "{}".format(text)
+            #     text_print = text_print[-args.words_max_print :]
+            #     os.system("clear")
+            #     print("\r会议记录: " + text_print)
 
     except Exception as e:
         print("连接已断开:", e)

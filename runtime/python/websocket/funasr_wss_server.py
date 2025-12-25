@@ -50,6 +50,7 @@ parser.add_argument("--punc_model_revision", type=str, default="v2.0.4", help=""
 parser.add_argument("--ngpu", type=int, default=1, help="GPU 数量 (0 为使用 CPU)")
 parser.add_argument("--device", type=str, default="cuda", help="推理设备选择：cuda (GPU) 或 cpu")
 parser.add_argument("--ncpu", type=int, default=4, help="CPU 核心数")
+parser.add_argument("--max_end_silence_time", type=int, default=2000, help="VAD 检测到多少毫秒静音则认为话结束了 (默认 3000ms)")
 parser.add_argument(
     "--certfile",
     type=str,
@@ -118,6 +119,7 @@ model_vad = AutoModel(
     disable_pbar=True,
     disable_log=True,
     trust_remote_code=True,
+    max_end_silence_time=args.max_end_silence_time, # 设置静音断句时间
 )
 
 # 4. 加载标点预测模型 (可选)
